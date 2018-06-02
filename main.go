@@ -1,32 +1,32 @@
 package main
 
 import (
-	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"github.com/alsmola/cloudtrail-today/models"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
-	"io"
+	"github.com/aws/aws-sdk-go/service/s3/s3iface"
 	"log"
 	"regexp"
 	"strings"
 )
 
 func main() {
-	regionUsages, err := parseS3File("azs-iam-activity-daily", "all", "2018/05/15")
+	regionUsages, err := parseS3File("azs-cloudtrail", "2018/05/15")
 	if err != nil {
 		panic(err)
 	}
 	log.Print("Usages: " + regionUsages.String())
 }
 
-func parseS3File(bucket string, actionType string, date string) (models.RegionUsages, error) {
+func parseS3File(bucket string, date string) (models.RegionUsages, error) {
 	sess := session.Must(session.NewSession())
 	svc := s3.New(sess, &aws.Config{
 		Region: aws.String("us-east-1"),
 	})
-	prefix := fmt.Sprintf("%s/%s", date, actionType)
+	prefix := fmt.Sprintf("AWSLogs/587066264960/CloudTrail/us-east-1/%s", date)
 	log.Printf("Looking at bucket s3://%s/%s...", bucket, prefix)
 	objects, err := svc.ListObjects(&s3.ListObjectsInput{
 		Bucket: aws.String(bucket),
@@ -37,66 +37,75 @@ func parseS3File(bucket string, actionType string, date string) (models.RegionUs
 		return nil, err
 	}
 
-	key := ""
+	keys := []string{}
 	for _, object := range objects.Contents {
-		if strings.HasSuffix(*object.Key, ".csv") {
-			key = *object.Key
+		if strings.HasSuffix(*object.Key, ".json.gz") {
+			keys = append(keys, *object.Key)
 		}
 	}
 
-	if key == "" {
-		return nil, fmt.Errorf("Expected csv file in bucket")
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("Expected json.gz files in bucket")
 	}
 
-	log.Printf("Looking up file s3://%s/%s", bucket, key)
+	regionUsages := models.RegionUsages{}
+	for _, key := range keys {
+		logs, err := GetLogs(svc, bucket, key)
+		if err != nil {
+			return nil, err
+		}
+		for _, l := range logs["Records"].([]interface{}) {
+			line := l.(map[string]interface{})
+			serviceStr := line["eventSource"].(string)
+			regionStr := "us-east-1"
+			actionStr := line["eventName"].(string)
+			identity := line["userIdentity"].(map[string]interface{})
+			if identity["arn"] == nil {
+				continue
+			}
+			subjectStr := identity["arn"].(string)
+			if _, ok := regionUsages[regionStr]; !ok {
+				regionUsages[regionStr] = models.RegionUsage{Region: regionStr, Usages: map[string]models.Usage{}}
+			}
+			regionUsage := regionUsages[regionStr]
+			usages := regionUsage.Usages
 
+			subject, name, err := GetSubject(subjectStr)
+			if err != nil {
+				return nil, err
+			}
+			if _, ok := usages[name]; !ok {
+				usages[name] = models.Usage{Subject: subject, Services: map[string]models.Service{}}
+			}
+			usage := usages[name]
+			if _, ok := usage.Services[serviceStr]; !ok {
+				usage.Services[serviceStr] = models.Service{Actions: map[string]models.Action{}}
+			}
+			service := usage.Services[serviceStr]
+
+			if _, ok := service.Actions[actionStr]; !ok {
+				service.Actions[actionStr] = models.Action{}
+			}
+		}
+	}
+	return regionUsages, nil
+}
+
+func GetLogs(svc s3iface.S3API, bucket, key string) (map[string]interface{}, error) {
+	log.Printf("Looking up file s3://%s/%s", bucket, key)
 	out, err := svc.GetObject(&s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
-
 	if err != nil {
 		return nil, err
 	}
-	r := csv.NewReader(out.Body)
-	_, err = r.Read()
+	var logs map[string]interface{}
+	err = json.NewDecoder(out.Body).Decode(&logs)
 	if err != nil {
 		return nil, err
 	}
-	regionUsages := models.RegionUsages{}
-	for {
-		line, err := r.Read()
-		if err == io.EOF {
-			break
-		}
-		serviceStr := line[0]
-		regionStr := line[1]
-		actionStr := line[2]
-		subjectStr := line[3]
-		if _, ok := regionUsages[regionStr]; !ok {
-			regionUsages[regionStr] = models.RegionUsage{Region: regionStr, Usages: map[string]models.Usage{}}
-		}
-		regionUsage := regionUsages[regionStr]
-		usages := regionUsage.Usages
-
-		subject, name, err := GetSubject(subjectStr)
-		if err != nil {
-			return nil, err
-		}
-		if _, ok := usages[name]; !ok {
-			usages[name] = models.Usage{Subject: subject, Services: map[string]models.Service{}}
-		}
-		usage := usages[name]
-		if _, ok := usage.Services[serviceStr]; !ok {
-			usage.Services[serviceStr] = models.Service{Actions: map[string]models.Action{}}
-		}
-		service := usage.Services[serviceStr]
-
-		if _, ok := service.Actions[actionStr]; !ok {
-			service.Actions[actionStr] = models.Action{}
-		}
-	}
-	return regionUsages, nil
+	return logs, nil
 }
 
 func GetSubject(subjectStr string) (models.Subject, string, error) {
