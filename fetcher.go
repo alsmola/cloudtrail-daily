@@ -72,7 +72,7 @@ func ProcessLogsWithChannel(fileCount int, c chan LogsWithIndex, done chan model
 	regionUsages := models.RegionUsages{}
 	for {
 		logs, more := <-c
-		fmt.Printf("Log %d of %d", logs.Index, fileCount)
+		fmt.Printf("Log %d of %d\n", logs.Index, fileCount)
 		if !more {
 			log.Print("Received finished signal")
 			done <- regionUsages
