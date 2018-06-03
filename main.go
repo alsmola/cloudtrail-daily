@@ -14,47 +14,79 @@ import (
 )
 
 func main() {
-	regionUsages, err := parseS3File("azs-cloudtrail", "2018/05/15")
+	regionUsages, err := ParseS3Files("azs-cloudtrail", "2018/05/15")
 	if err != nil {
 		panic(err)
 	}
 	log.Print("Usages: " + regionUsages.String())
 }
 
-func parseS3File(bucket string, date string) (models.RegionUsages, error) {
+func GetS3FilesFromBucket(svc s3iface.S3API, bucket, date string) ([]string, error) {
+	prefix := fmt.Sprintf("AWSLogs/587066264960/CloudTrail/us-east-1/%s", date)
+	log.Debugf("Looking at bucket s3://%s/%s...", bucket, prefix)
+	params := &s3.ListObjectsInput{
+		Bucket: aws.String(bucket),
+		Prefix: aws.String(prefix),
+	}
+	keys := []string{}
+	err := svc.ListObjectsPages(params, func(page *s3.ListObjectsOutput, lastPage bool) bool {
+		for _, object := range page.Contents {
+			if strings.HasSuffix(*object.Key, ".json.gz") {
+				keys = append(keys, *object.Key)
+			}
+		}
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("Expected json.gz files in bucket")
+	}
+	return keys, nil
+}
+
+type LogsWithIndex struct {
+	Index int
+	Logs  []interface{}
+}
+
+func ParseS3Files(bucket, date string) (models.RegionUsages, error) {
 	sess := session.Must(session.NewSession())
 	svc := s3.New(sess, &aws.Config{
 		Region: aws.String("us-east-1"),
 	})
-	prefix := fmt.Sprintf("AWSLogs/587066264960/CloudTrail/us-east-1/%s", date)
-	log.Printf("Looking at bucket s3://%s/%s...", bucket, prefix)
-	objects, err := svc.ListObjects(&s3.ListObjectsInput{
-		Bucket: aws.String(bucket),
-		Prefix: aws.String(prefix),
-	})
-
+	keys, err := GetS3FilesFromBucket(svc, bucket, date)
 	if err != nil {
 		return nil, err
 	}
-
-	keys := []string{}
-	for _, object := range objects.Contents {
-		if strings.HasSuffix(*object.Key, ".json.gz") {
-			keys = append(keys, *object.Key)
-		}
-	}
-
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("Expected json.gz files in bucket")
-	}
-
-	regionUsages := models.RegionUsages{}
-	for _, key := range keys {
+	c := make(chan LogsWithIndex)
+	done := make(chan models.RegionUsages)
+	go ProcessLogsWithChannel(len(keys), c, done)
+	for index, key := range keys {
 		logs, err := GetLogs(svc, bucket, key)
 		if err != nil {
-			return nil, err
+			panic(err)
 		}
-		for _, l := range logs["Records"].([]interface{}) {
+		logWithIndex := LogsWithIndex{index, logs["Records"].([]interface{})}
+		c <- logWithIndex
+	}
+	close(c)
+	regionUsages := <-done
+	return regionUsages, nil
+}
+
+func ProcessLogsWithChannel(fileCount int, c chan LogsWithIndex, done chan models.RegionUsages) {
+	regionUsages := models.RegionUsages{}
+	for {
+		logs, more := <-c
+		log.Printf("Log %d of %d", logs.Index, fileCount)
+		if !more {
+			log.Print("Received finished signal")
+			done <- regionUsages
+			return
+		}
+		for _, l := range logs.Logs {
 			line := l.(map[string]interface{})
 			serviceStr := line["eventSource"].(string)
 			regionStr := "us-east-1"
@@ -69,10 +101,9 @@ func parseS3File(bucket string, date string) (models.RegionUsages, error) {
 			}
 			regionUsage := regionUsages[regionStr]
 			usages := regionUsage.Usages
-
 			subject, name, err := GetSubject(subjectStr)
 			if err != nil {
-				return nil, err
+				panic(err)
 			}
 			if _, ok := usages[name]; !ok {
 				usages[name] = models.Usage{Subject: subject, Services: map[string]models.Service{}}
@@ -82,13 +113,11 @@ func parseS3File(bucket string, date string) (models.RegionUsages, error) {
 				usage.Services[serviceStr] = models.Service{Actions: map[string]models.Action{}}
 			}
 			service := usage.Services[serviceStr]
-
 			if _, ok := service.Actions[actionStr]; !ok {
 				service.Actions[actionStr] = models.Action{}
 			}
 		}
 	}
-	return regionUsages, nil
 }
 
 func GetLogs(svc s3iface.S3API, bucket, key string) (map[string]interface{}, error) {
