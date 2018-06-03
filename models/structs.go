@@ -19,7 +19,7 @@ type Service struct {
 }
 
 type Action struct {
-	Resources []string `json:"resources"`
+	// Not saving resources, for now
 }
 
 type Subject struct {

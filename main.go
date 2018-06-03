@@ -2,166 +2,86 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"github.com/alsmola/cloudtrail-today/models"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3iface"
+	"io/ioutil"
 	"log"
-	"regexp"
-	"strings"
+	"time"
 )
 
+type RegionUsagesOutput map[string]models.RegionUsages
+
+func jsonKey(bucket, region, date string) string {
+	return fmt.Sprintf("%s/%s/%s", bucket, region, date)
+}
+
 func main() {
-	regionUsages, err := ParseS3Files("azs-cloudtrail", "2018/05/15")
-	if err != nil {
-		panic(err)
-	}
-	log.Print("Usages: " + regionUsages.String())
-}
+	var regionUsages models.RegionUsages
+	regionUsagesOutput := RegionUsagesOutput{}
 
-func GetS3FilesFromBucket(svc s3iface.S3API, bucket, date string) ([]string, error) {
-	prefix := fmt.Sprintf("AWSLogs/587066264960/CloudTrail/us-east-1/%s", date)
-	log.Debugf("Looking at bucket s3://%s/%s...", bucket, prefix)
-	params := &s3.ListObjectsInput{
-		Bucket: aws.String(bucket),
-		Prefix: aws.String(prefix),
-	}
-	keys := []string{}
-	err := svc.ListObjectsPages(params, func(page *s3.ListObjectsOutput, lastPage bool) bool {
-		for _, object := range page.Contents {
-			if strings.HasSuffix(*object.Key, ".json.gz") {
-				keys = append(keys, *object.Key)
-			}
-		}
-		return true
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("Expected json.gz files in bucket")
-	}
-	return keys, nil
-}
+	bucketPtr := flag.String("bucket", "", "The S3 bucket storing CloudTrail logs")
+	regionPtr := flag.String("region", "us-east-1", "The CloudTrail logs region to view")
+	datePtr := flag.String("date", "", "The CloudTrail logs date to view")
+	debugPtr := flag.Bool("debug", false, "View debug logs")
+	invalidateCachePtr := flag.Bool("invalidate-cache", false, "To invalidate cache for the region and day")
+	flag.Parse()
+	bucket := *bucketPtr
+	region := *regionPtr
+	date := *datePtr
+	invalidateCache := *invalidateCachePtr
 
-type LogsWithIndex struct {
-	Index int
-	Logs  []interface{}
-}
-
-func ParseS3Files(bucket, date string) (models.RegionUsages, error) {
-	sess := session.Must(session.NewSession())
-	svc := s3.New(sess, &aws.Config{
-		Region: aws.String("us-east-1"),
-	})
-	keys, err := GetS3FilesFromBucket(svc, bucket, date)
-	if err != nil {
-		return nil, err
+	if bucket == "" {
+		log.Fatal(fmt.Errorf("No bucket provided. Pass the S3 bucket with your CloudTrail logs using the -bucket flag (e.g. cloudtrail-daily bucket=my-cloudtrail-bucket)."))
 	}
-	c := make(chan LogsWithIndex)
-	done := make(chan models.RegionUsages)
-	go ProcessLogsWithChannel(len(keys), c, done)
-	for index, key := range keys {
-		logs, err := GetLogs(svc, bucket, key)
+
+	if !*debugPtr {
+		// turn off logs
+		log.SetFlags(0)
+		log.SetOutput(ioutil.Discard)
+	}
+
+	cloudtrailJson, err := ioutil.ReadFile("./cloudtrail-today.json")
+	if err != nil {
+		log.Print("cloudtrail-today.json not found, creating...")
+		regionUsagesOutputJson, _ := json.Marshal(regionUsagesOutput)
+		err = ioutil.WriteFile("cloudtrail-today.json", regionUsagesOutputJson, 0644)
 		if err != nil {
-			panic(err)
+			log.Fatal(err)
 		}
-		logWithIndex := LogsWithIndex{index, logs["Records"].([]interface{})}
-		c <- logWithIndex
-	}
-	close(c)
-	regionUsages := <-done
-	return regionUsages, nil
-}
-
-func ProcessLogsWithChannel(fileCount int, c chan LogsWithIndex, done chan models.RegionUsages) {
-	regionUsages := models.RegionUsages{}
-	for {
-		logs, more := <-c
-		log.Printf("Log %d of %d", logs.Index, fileCount)
-		if !more {
-			log.Print("Received finished signal")
-			done <- regionUsages
-			return
-		}
-		for _, l := range logs.Logs {
-			line := l.(map[string]interface{})
-			serviceStr := line["eventSource"].(string)
-			regionStr := "us-east-1"
-			actionStr := line["eventName"].(string)
-			identity := line["userIdentity"].(map[string]interface{})
-			if identity["arn"] == nil {
-				continue
-			}
-			subjectStr := identity["arn"].(string)
-			if _, ok := regionUsages[regionStr]; !ok {
-				regionUsages[regionStr] = models.RegionUsage{Region: regionStr, Usages: map[string]models.Usage{}}
-			}
-			regionUsage := regionUsages[regionStr]
-			usages := regionUsage.Usages
-			subject, name, err := GetSubject(subjectStr)
-			if err != nil {
-				panic(err)
-			}
-			if _, ok := usages[name]; !ok {
-				usages[name] = models.Usage{Subject: subject, Services: map[string]models.Service{}}
-			}
-			usage := usages[name]
-			if _, ok := usage.Services[serviceStr]; !ok {
-				usage.Services[serviceStr] = models.Service{Actions: map[string]models.Action{}}
-			}
-			service := usage.Services[serviceStr]
-			if _, ok := service.Actions[actionStr]; !ok {
-				service.Actions[actionStr] = models.Action{}
-			}
-		}
-	}
-}
-
-func GetLogs(svc s3iface.S3API, bucket, key string) (map[string]interface{}, error) {
-	log.Printf("Looking up file s3://%s/%s", bucket, key)
-	out, err := svc.GetObject(&s3.GetObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return nil, err
-	}
-	var logs map[string]interface{}
-	err = json.NewDecoder(out.Body).Decode(&logs)
-	if err != nil {
-		return nil, err
-	}
-	return logs, nil
-}
-
-func GetSubject(subjectStr string) (models.Subject, string, error) {
-	s := models.Subject{}
-	name := ""
-	roleRegExp := `arn:aws:sts::(\d*):assumed-role\/(.*)`
-	re1, _ := regexp.Compile(roleRegExp)
-	result := re1.FindStringSubmatch(subjectStr)
-	if len(result) > 0 {
-		s.Role = &models.Role{
-			Account: result[1],
-			Name:    result[2],
-		}
-		name = fmt.Sprintf("role:%s", s.Role.Name)
 	} else {
-		userRegExp := `arn:aws:iam::(\d*):user\/(.*)`
-		re2, _ := regexp.Compile(userRegExp)
-		result = re2.FindStringSubmatch(subjectStr)
-		if len(result) > 0 {
-			s.User = &models.User{
-				Account: result[1],
-				Name:    result[2],
-			}
-			name = fmt.Sprintf("user:%s", s.User.Name)
-		} else {
-			return s, "", fmt.Errorf("No matching role/user pattern for subject: " + subjectStr)
+		err = json.Unmarshal(cloudtrailJson, &regionUsagesOutput)
+		if err != nil {
+			log.Fatal(err)
 		}
 	}
-	return s, name, nil
+
+	if date == "" {
+		today := time.Now().Local().Format("2006/01/02")
+		date = today
+	} else if !invalidateCache {
+		key := jsonKey(bucket, region, date)
+		regionUsages = regionUsagesOutput[key]
+		if regionUsages != nil {
+			log.Print("Found in cloudtrail-today.json: ", key)
+		} else {
+			log.Print("Not found in cloudtrail-today.json: ", key)
+		}
+	}
+
+	if regionUsages == nil {
+		regionUsages, err = ParseS3Files(bucket, date, region)
+		if err != nil {
+			log.Fatal(err)
+		}
+		key := jsonKey(bucket, region, date)
+		regionUsagesOutput[key] = regionUsages
+		regionUsagesOutputJson, _ := json.Marshal(regionUsagesOutput)
+		err = ioutil.WriteFile("cloudtrail-today.json", regionUsagesOutputJson, 0644)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	fmt.Println(regionUsages.String())
 }
