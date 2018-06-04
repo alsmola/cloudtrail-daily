@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/alsmola/cloudtrail-today/models"
+	"github.com/alsmola/cloudtrail-daily/models"
 	"io/ioutil"
 	"log"
 	"time"
@@ -41,11 +41,11 @@ func main() {
 		log.SetOutput(ioutil.Discard)
 	}
 
-	cloudtrailJson, err := ioutil.ReadFile("./cloudtrail-today.json")
+	cloudtrailJson, err := ioutil.ReadFile("./cloudtrail-daily.json")
 	if err != nil {
-		log.Print("cloudtrail-today.json not found, creating...")
+		log.Print("cloudtrail-daily.json not found, creating...")
 		regionUsagesOutputJson, _ := json.Marshal(regionUsagesOutput)
-		err = ioutil.WriteFile("cloudtrail-today.json", regionUsagesOutputJson, 0644)
+		err = ioutil.WriteFile("cloudtrail-daily.json", regionUsagesOutputJson, 0644)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -63,9 +63,9 @@ func main() {
 		key := jsonKey(bucket, region, date)
 		regionUsages = regionUsagesOutput[key]
 		if regionUsages != nil {
-			log.Print("Found in cloudtrail-today.json: ", key)
+			log.Print("Found in cloudtrail-daily.json: ", key)
 		} else {
-			log.Print("Not found in cloudtrail-today.json: ", key)
+			log.Print("Not found in cloudtrail-daily.json: ", key)
 		}
 	}
 
@@ -77,7 +77,7 @@ func main() {
 		key := jsonKey(bucket, region, date)
 		regionUsagesOutput[key] = regionUsages
 		regionUsagesOutputJson, _ := json.Marshal(regionUsagesOutput)
-		err = ioutil.WriteFile("cloudtrail-today.json", regionUsagesOutputJson, 0644)
+		err = ioutil.WriteFile("cloudtrail-daily.json", regionUsagesOutputJson, 0644)
 		if err != nil {
 			log.Fatal(err)
 		}
