@@ -4,7 +4,7 @@
 
 If your CloudTrail logs are in `s3://my-cloudtrail-bucket/`:
 
-    cloudtrail-daily -bucket=my-cloudtrail-bucket
+    cloudtrail-daily -account=1234567890 -bucket=my-cloudtrail-bucket
 
 `cloudtrail-daily` will download the log files and generate a summary report of all IAM users and roles, the services used (e.g. `s3.amazonaws.com`), and the actions performed (e.g. `ListBuckets`).
 
@@ -31,7 +31,7 @@ Role: RedirectToIndex/us-east-1.RedirectToIndex
 
 Since each run takes a while to download and process all of the logs, the summaries of days other than the current day are cached in a file named `cloudtrail-daily.json`.
 
-## Flags
+## Other Flags
 
 `region`: Default is `us-east-1`
 
@@ -43,5 +43,5 @@ Since each run takes a while to download and process all of the logs, the summar
 
 ### Flags example
 
-    cloudtrail-daily -bucket=my-cloudtrail-bucket -region=us-west-2 -date=2018/05/28 -invalidate-cache -debug
+    cloudtrail-daily -account=1234567890 -bucket=my-cloudtrail-bucket -region=us-west-2 -date=2018/05/28 -invalidate-cache -debug
 

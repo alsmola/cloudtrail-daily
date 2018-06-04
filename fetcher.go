@@ -18,8 +18,8 @@ type LogsWithIndex struct {
 	Logs  []interface{}
 }
 
-func GetS3FilesFromBucket(svc s3iface.S3API, bucket, date string) ([]string, error) {
-	prefix := fmt.Sprintf("AWSLogs/587066264960/CloudTrail/us-east-1/%s", date)
+func GetS3FilesFromBucket(svc s3iface.S3API, account, bucket, date string) ([]string, error) {
+	prefix := fmt.Sprintf("AWSLogs/%s/CloudTrail/us-east-1/%s", account, date)
 	log.Printf("Looking at bucket s3://%s/%s...", bucket, prefix)
 	params := &s3.ListObjectsInput{
 		Bucket: aws.String(bucket),
@@ -43,12 +43,12 @@ func GetS3FilesFromBucket(svc s3iface.S3API, bucket, date string) ([]string, err
 	return keys, nil
 }
 
-func ParseS3Files(bucket, date, region string) (models.RegionUsages, error) {
+func ParseS3Files(account, bucket, date, region string) (models.RegionUsages, error) {
 	sess := session.Must(session.NewSession())
 	svc := s3.New(sess, &aws.Config{
 		Region: aws.String(region),
 	})
-	keys, err := GetS3FilesFromBucket(svc, bucket, date)
+	keys, err := GetS3FilesFromBucket(svc, account, bucket, date)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +162,17 @@ func GetSubject(subjectStr string) (models.Subject, string, error) {
 				}
 				name = fmt.Sprintf("federated-user:%s", s.User.Name)
 			} else {
-				return s, "", fmt.Errorf("No matching role/user pattern for subject: " + subjectStr)
+				federatedUserRegExp := `arn:aws:iam::(\d*):root`
+				re4, _ := regexp.Compile(federatedUserRegExp)
+				result = re4.FindStringSubmatch(subjectStr)
+				if len(result) > 0 {
+					s.User = &models.User{
+						Account: result[1],
+						Name:    "root",
+					}
+				} else {
+					return s, "", fmt.Errorf("No matching role/user pattern for subject: " + subjectStr)
+				}
 			}
 		}
 	}
