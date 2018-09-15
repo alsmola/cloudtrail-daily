@@ -64,7 +64,9 @@ func main() {
 	if date == "" {
 		today := time.Now().Local().Format("2006/01/02")
 		date = today
-	} else if !invalidateCache {
+	}
+
+	if !invalidateCache {
 		key := jsonKey(bucket, region, date)
 		regionUsages = regionUsagesOutput[key]
 		if regionUsages != nil {
@@ -88,5 +90,6 @@ func main() {
 		}
 	}
 
+	fmt.Printf("Date: %s, Bucket: %s", date, bucket)
 	fmt.Println(regionUsages.String())
 }
